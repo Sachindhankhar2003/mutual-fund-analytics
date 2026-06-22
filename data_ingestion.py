@@ -1,25 +1,28 @@
-"""
-==============================================================
- data_ingestion.py  –  Mutual Fund Analytics  |  Day 1
-==============================================================
-Purpose:
-    Load every CSV file from data/raw/, profile its content,
-    and generate a concise data-quality summary report.
+# data_ingestion.py - Day 1: load and profile NAV CSV files
+# reads every CSV from data/raw/, checks quality, prints a summary
 
-Author : Mutual Fund Analytics Team
-Version: 1.0.0
-==============================================================
-"""
-
-from __future__ import annotations
-
-import os
+import io
 import sys
 from pathlib import Path
-from typing import Optional
-import textwrap
+
+# fix console encoding issue on Windows
+if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+if sys.stderr.encoding and sys.stderr.encoding.lower() != "utf-8":
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 import pandas as pd
+
+# expected keywords in scheme_name for each file
+# used to catch cases where mfapi returned the wrong fund
+EXPECTED_FUNDS = {
+    "hdfc_top100_nav.csv":   ["HDFC", "Large Cap"],
+    "sbi_bluechip_nav.csv":  ["SBI",  "Large Cap"],
+    "icici_bluechip_nav.csv":["ICICI","Large Cap"],
+    "nippon_largecap_nav.csv":["Nippon","Large Cap"],
+    "axis_bluechip_nav.csv": ["Axis", "Large Cap"],
+    "kotak_bluechip_nav.csv":["Kotak","Large Cap"],
+}
 
 # ─────────────────────────────────────────────────────────────
 # Configuration
@@ -51,32 +54,41 @@ def print_subsection(title: str) -> None:
 # Core profiling logic
 # ─────────────────────────────────────────────────────────────
 
-def load_csv(filepath: Path) -> Optional[pd.DataFrame]:
-    """
-    Safely load a CSV file into a DataFrame.
-
-    Parameters
-    ----------
-    filepath : Path
-        Absolute path to the CSV file.
-
-    Returns
-    -------
-    pd.DataFrame | None
-        Loaded DataFrame or None if loading fails.
-    """
+def load_csv(filepath):
+    """Load a CSV file, return DataFrame or None if it fails."""
     try:
-        df = pd.read_csv(filepath)
-        return df
+        return pd.read_csv(filepath)
     except pd.errors.EmptyDataError:
         print(f"  [WARNING] File is empty: {filepath.name}")
     except pd.errors.ParserError as exc:
         print(f"  [ERROR] CSV parse error in '{filepath.name}': {exc}")
     except PermissionError:
-        print(f"  [ERROR] Permission denied reading '{filepath.name}'")
-    except Exception as exc:  # noqa: BLE001
-        print(f"  [ERROR] Unexpected error loading '{filepath.name}': {exc}")
+        print(f"  [ERROR] Permission denied: '{filepath.name}'")
+    except Exception as exc:
+        print(f"  [ERROR] Could not load '{filepath.name}': {exc}")
     return None
+
+
+def check_scheme_name(df, filename):
+    """
+    Check that the scheme_name column matches the expected fund.
+    Flags cases where mfapi returned a different fund for our scheme code.
+    """
+    if "scheme_name" not in df.columns:
+        return True  # can't check, skip
+    keywords = EXPECTED_FUNDS.get(filename, [])
+    if not keywords:
+        return True  # no expectation defined for this file
+    actual = str(df["scheme_name"].iloc[0])
+    match = all(kw.lower() in actual.lower() for kw in keywords)
+    if match:
+        print(f"  [OK] scheme_name matches expected fund ({keywords})")
+    else:
+        print(f"  [WARN] scheme_name MISMATCH!")
+        print(f"         Expected keywords : {keywords}")
+        print(f"         Actual name       : {actual}")
+        print(f"         --> The scheme code may be wrong. Re-run live_nav_fetch.py")
+    return match
 
 
 def report_missing_values(df: pd.DataFrame) -> None:
@@ -89,9 +101,9 @@ def report_missing_values(df: pd.DataFrame) -> None:
     missing_df = missing_df[missing_df["Missing Count"] > 0]
 
     if missing_df.empty:
-        print("  ✅  No missing values detected.")
+        print("  [OK]  No missing values detected.")
     else:
-        print(f"  ⚠️  Columns with missing values:\n")
+        print("  [WARNING] Columns with missing values:\n")
         print(missing_df.to_string(index=True))
 
 
@@ -99,77 +111,67 @@ def report_duplicates(df: pd.DataFrame) -> int:
     """Print duplicate-row statistics and return duplicate count."""
     dup_count = df.duplicated().sum()
     if dup_count == 0:
-        print("  ✅  No duplicate rows detected.")
+        print("  [OK]  No duplicate rows detected.")
     else:
-        print(f"  ⚠️  Duplicate rows : {dup_count:,} ({dup_count / len(df) * 100:.2f}%)")
+        print(f"  [WARNING] Duplicate rows : {dup_count:,} ({dup_count / len(df) * 100:.2f}%)")
     return int(dup_count)
 
 
-def profile_dataframe(filepath: Path) -> dict:
-    """
-    Full profiling pipeline for a single CSV file.
-
-    Returns a summary dict for the aggregated quality report.
-    """
+def profile_dataframe(filepath):
+    """Profile a single CSV file and return a summary dict."""
     print_section(f"FILE: {filepath.name}")
 
-    # ── 1. Load ────────────────────────────────────────────────
     df = load_csv(filepath)
     if df is None:
-        return {
-            "file": filepath.name,
-            "status": "LOAD_FAILED",
-            "rows": 0,
-            "cols": 0,
-            "missing_cells": 0,
-            "duplicate_rows": 0,
-        }
+        return {"file": filepath.name, "status": "LOAD_FAILED",
+                "rows": 0, "cols": 0, "missing_cells": 0,
+                "duplicate_rows": 0, "name_ok": False}
 
-    # ── 2. Filename ────────────────────────────────────────────
-    print(f"\n📄  Filename : {filepath.name}")
-    print(f"    Full path: {filepath}")
+    print(f"  Path: {filepath}")
 
-    # ── 3. Shape ───────────────────────────────────────────────
+    # shape
     print_subsection("Shape")
     rows, cols = df.shape
     print(f"  Rows    : {rows:,}")
     print(f"  Columns : {cols}")
 
-    # ── 4. Data types ──────────────────────────────────────────
+    # column types
     print_subsection("Column Data Types")
-    dtype_df = pd.DataFrame(
-        {"Column": df.columns, "Dtype": df.dtypes.values}
-    ).reset_index(drop=True)
-    print(dtype_df.to_string(index=False))
+    print(df.dtypes.to_string())
 
-    # ── 5. First 5 rows ────────────────────────────────────────
+    # first 5 rows
     print_subsection("First 5 Rows")
     print(df.head(5).to_string(index=True))
 
-    # ── 6. Missing values ──────────────────────────────────────
-    print_subsection("Missing Value Report")
+    # scheme name validation (did we get the right fund?)
+    print_subsection("Scheme Name Check")
+    name_ok = check_scheme_name(df, filepath.name)
+
+    # missing values
+    print_subsection("Missing Values")
     missing_cells = int(df.isnull().sum().sum())
     report_missing_values(df)
 
-    # ── 7. Duplicate rows ──────────────────────────────────────
-    print_subsection("Duplicate Row Report")
+    # duplicate rows
+    print_subsection("Duplicate Rows")
     duplicate_rows = report_duplicates(df)
 
-    # ── 8. Basic descriptive stats ─────────────────────────────
-    print_subsection("Descriptive Statistics (Numeric Columns)")
+    # basic stats for numeric columns
+    print_subsection("Descriptive Statistics")
     numeric_cols = df.select_dtypes(include="number")
     if numeric_cols.empty:
-        print("  No numeric columns found.")
+        print("  No numeric columns.")
     else:
         print(numeric_cols.describe().round(4).to_string())
 
     return {
-        "file": filepath.name,
-        "status": "OK",
-        "rows": rows,
-        "cols": cols,
-        "missing_cells": missing_cells,
+        "file":           filepath.name,
+        "status":         "OK",
+        "rows":           rows,
+        "cols":           cols,
+        "missing_cells":  missing_cells,
         "duplicate_rows": duplicate_rows,
+        "name_ok":        name_ok,
     }
 
 
@@ -177,45 +179,44 @@ def profile_dataframe(filepath: Path) -> dict:
 # Data Quality Summary
 # ─────────────────────────────────────────────────────────────
 
-def generate_quality_report(summaries: list[dict]) -> None:
-    """
-    Aggregate all per-file summaries into one data-quality report.
-    """
-    print_section("DATA QUALITY SUMMARY REPORT")
+def generate_quality_report(summaries):
+    """Print a summary table of all files processed."""
+    print_section("DAY-1 DATA QUALITY SUMMARY")
 
     if not summaries:
-        print("  No files were processed.")
+        print("  No files processed.")
         return
 
     report_df = pd.DataFrame(summaries)
     report_df["quality_score"] = report_df.apply(_compute_quality_score, axis=1)
 
-    print(
-        report_df[
-            ["file", "status", "rows", "cols", "missing_cells", "duplicate_rows", "quality_score"]
-        ].to_string(index=False)
-    )
+    print(report_df[["file", "status", "name_ok", "rows",
+                      "missing_cells", "duplicate_rows",
+                      "quality_score"]].to_string(index=False))
 
-    # Overall stats
-    total_files    = len(report_df)
-    loaded_ok      = (report_df["status"] == "OK").sum()
-    total_rows     = report_df["rows"].sum()
-    total_missing  = report_df["missing_cells"].sum()
-    total_dups     = report_df["duplicate_rows"].sum()
-    avg_quality    = report_df["quality_score"].mean()
+    total_files   = len(report_df)
+    loaded_ok     = (report_df["status"] == "OK").sum()
+    total_rows    = report_df["rows"].sum()
+    total_missing = report_df["missing_cells"].sum()
+    total_dups    = report_df["duplicate_rows"].sum()
+    avg_quality   = report_df["quality_score"].mean()
+    name_issues   = (~report_df["name_ok"]).sum()
 
     print(f"""
-┌─────────────────────────────────────────────┐
-│           OVERALL QUALITY METRICS           │
-├─────────────────────────────────────────────┤
-│  Files processed   : {total_files:<4}                   │
-│  Files loaded OK   : {loaded_ok:<4}                   │
-│  Total rows        : {total_rows:<10,}           │
-│  Total missing     : {total_missing:<10,}           │
-│  Total duplicates  : {total_dups:<10,}           │
-│  Avg quality score : {avg_quality:<6.1f}% / 100         │
-└─────────────────────────────────────────────┘
++---------------------------------------------+
+|  Day-1 Summary                              |
++---------------------------------------------+
+|  Files loaded OK   : {loaded_ok}/{total_files}                      |
+|  Total rows        : {total_rows:<10,}           |
+|  Total missing     : {total_missing:<10,}           |
+|  Total duplicates  : {total_dups:<10,}           |
+|  Avg quality score : {avg_quality:<5.1f}% / 100          |
+|  Scheme name issues: {name_issues:<4}                   |
++---------------------------------------------+
 """)
+    if name_issues > 0:
+        print("  [ACTION NEEDED] Some files have wrong fund data.")
+        print("  Re-run live_nav_fetch.py to download correct NAV files.")
 
 
 def _compute_quality_score(row: pd.Series) -> float:
@@ -255,7 +256,7 @@ def main() -> None:
 
     print(f"  Found {len(csv_files)} CSV file(s):\n")
     for f in csv_files:
-        print(f"    • {f.name}")
+        print(f"    * {f.name}")
 
     summaries: list[dict] = []
     for filepath in csv_files:
