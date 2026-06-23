@@ -35,7 +35,6 @@ SUBSEP: str = "-" * 70
 # ─────────────────────────────────────────────────────────────
 # Helper utilities
 # ─────────────────────────────────────────────────────────────
-
 def print_section(title: str) -> None:
     """Print a visually distinct section header."""
     print(f"\n{SEPARATOR}")

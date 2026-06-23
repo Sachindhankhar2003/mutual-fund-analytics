@@ -98,6 +98,13 @@ def save_nav_csv(data, scheme_code, filename):
     # sort oldest first
     df = df.sort_values("date").reset_index(drop=True)
 
+    # clean bad zero-NAV records from the API (interpolate linearly)
+    zero_nav_count = int((df["nav"] == 0).sum())
+    if zero_nav_count:
+        print(f"  [WARN] {zero_nav_count} zero-NAV row(s) detected – interpolating.")
+        df.loc[df["nav"] == 0, "nav"] = float("nan")
+        df["nav"] = df["nav"].interpolate(method="linear").round(4)
+
     # reorder columns
     df = df[["scheme_code", "scheme_name", "scheme_category", "fund_house", "date", "nav"]]
 
