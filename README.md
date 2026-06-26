@@ -188,3 +188,6 @@ capstone programme. No commercial use intended.
 ---
 
 *Built with ❤️ by the Mutual Fund Analytics Team*
+
+*(Last updated/reviewed: June 26, 2026)*
+
